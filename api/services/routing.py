@@ -4,12 +4,15 @@ import polyline
 import logging
 from django.conf import settings
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # Use a default fallback key or environment variable. 
-# NOTE: User should ideally set ORS_API_KEY in environment variables.
-ORS_API_KEY = os.environ.get('ORS_API_KEY', '5b3ce3597851110001cf62489c72e2cf38f9464e83c21a1f0a2d5345') # Demo key for testing purposes, replace in prod
+# NOTE: User should ideally set ORS_API_KEY in the .env file.
+ORS_API_KEY = os.environ.get('ORS_API_KEY', '5b3ce3597851110001cf62489c72e2cf38f9464e83c21a1f0a2d5345')
 
 def get_coordinates(location_name):
     """Geocode a location string to (lat, lon)"""
