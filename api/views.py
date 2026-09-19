@@ -3,12 +3,24 @@ from rest_framework.response import Response
 from rest_framework import status
 from .serializers import RouteRequestSerializer, RouteResponseSerializer
 from .services.routing import get_coordinates, fetch_route
-from .services.optimizer import optimize_fuel_stops
+from .services.optimizer import optimize_fuel_stops, VEHICLE_RANGE, MPG
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class OptimizeRouteView(APIView):
+    """
+    POST /api/optimize-route/
+
+    Takes a start and finish location within the USA and returns:
+    - The driving route geometry (decoded polyline)
+    - Optimal fuel stops based on cheapest price within 500-mile range
+    - Total fuel cost at 10 MPG
+
+    One external API call (OpenRouteService) is made per request.
+    """
+
     def post(self, request):
         serializer = RouteRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -17,40 +29,62 @@ class OptimizeRouteView(APIView):
         start_loc = serializer.validated_data['start_location']
         finish_loc = serializer.validated_data['finish_location']
 
-        # 1. Geocode
+        # ── Step 1: Geocode both locations ────────────────────────────────────
         start_coords = get_coordinates(start_loc)
-        finish_coords = get_coordinates(finish_loc)
-
-        if not start_coords or not finish_coords:
+        if not start_coords:
             return Response(
-                {"error": "Could not geocode one or both locations."}, 
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": f"Could not resolve start location: '{start_loc}'. "
+                           "Please use a city/state format e.g. 'Chicago, IL'."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 2. Get Route
-        route_geometry, total_distance = fetch_route(start_coords, finish_coords)
+        finish_coords = get_coordinates(finish_loc)
+        if not finish_coords:
+            return Response(
+                {"error": f"Could not resolve finish location: '{finish_loc}'. "
+                           "Please use a city/state format e.g. 'Miami, FL'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        logger.info(f"Route request: '{start_loc}' → '{finish_loc}'")
+
+        # ── Step 2: ONE call to ORS to fetch route ────────────────────────────
+        try:
+            route_geometry, total_distance = fetch_route(start_coords, finish_coords)
+        except ValueError as ve:
+            return Response({"error": str(ve)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
         if not route_geometry:
             return Response(
-                {"error": "Failed to fetch route. Ensure ORS_API_KEY is valid and locations are routable."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Could not retrieve a driving route between the provided locations. "
+                           "Ensure both locations are within the USA and reachable by road."},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        # 3. Optimize Fuel Stops
+        # ── Step 3: Optimize fuel stops (no external calls) ───────────────────
         stops, total_cost = optimize_fuel_stops(route_geometry, total_distance)
+
         if total_cost == -1:
             return Response(
-                {"error": "Could not find a valid fueling strategy for this route. Might be out of range of stations."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "Could not find a valid fueling strategy. "
+                           "The route may pass through an area with no nearby truck stops."},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
-        # 4. Return
-        resp_data = {
-            'route_geometry': route_geometry,
+        # ── Step 4: Build and return response ────────────────────────────────
+        response_payload = {
+            'start_location': start_loc,
+            'finish_location': finish_loc,
+            'start_coords': list(start_coords),
+            'finish_coords': list(finish_coords),
             'total_distance_miles': round(total_distance, 2),
+            'total_fuel_cost_usd': total_cost,
+            'total_stops': len(stops),
+            'vehicle_range_miles': VEHICLE_RANGE,
+            'vehicle_mpg': MPG,
             'optimal_fuel_stops': stops,
-            'total_fuel_cost': round(total_cost, 2)
+            'route_geometry': route_geometry,
         }
-        
-        resp_serializer = RouteResponseSerializer(resp_data)
-        return Response(resp_serializer.data, status=status.HTTP_200_OK)
 
+        out = RouteResponseSerializer(response_payload)
+        return Response(out.data, status=status.HTTP_200_OK)

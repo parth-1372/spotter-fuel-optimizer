@@ -1,0 +1,8 @@
+django==4.2.30
+djangorestframework==3.16.1
+openrouteservice==2.3.3
+geopy==2.5.0
+scipy==1.13.1
+numpy==2.0.2
+polyline==2.0.4
+python-dotenv==1.2.1
