@@ -1,5 +1,4 @@
 import numpy as np
-from geopy.distance import geodesic
 import logging
 from .spatial_index import SpatialIndex
 
@@ -56,7 +55,7 @@ def optimize_fuel_stops(route_geometry, total_distance):
     """
     index = SpatialIndex.get_instance()
 
-    if not index.kdtree or not route_geometry:
+    if index._lats is None or len(index._lats) == 0 or not route_geometry:
         logger.error("Spatial index not ready or empty route.")
         return [], 0
 

@@ -1,32 +1,30 @@
 import json
 import numpy as np
-from scipy.spatial import KDTree
 import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Path to the pre-geocoded stations file committed to the repo.
-# This means zero DB dependency and zero geocoding wait on deployment.
-DATA_FILE = Path(__file__).resolve().parent.parent.parent.parent / 'data' / 'fuel_stations.json'
+# Pre-geocoded stations bundled with the repo — no DB needed on deployment.
+# Resolves to: <project_root>/data/fuel_stations.json
+DATA_FILE = Path(__file__).resolve().parents[2] / 'data' / 'fuel_stations.json'
 
 
 class SpatialIndex:
     """
-    Singleton that loads all pre-geocoded FuelStation records from a bundled
-    JSON file into a scipy KDTree for sub-millisecond spatial radius queries.
+    Singleton spatial index using pure numpy vectorised haversine.
+    No scipy/gfortran dependency — works on any platform including Render free tier.
 
-    Loading from a JSON file (instead of the DB) means:
-    - No database required for station data
-    - Works immediately on any deployment (Render, Railway, etc.)
-    - No 2-3 hour geocoding step needed on the server
+    With ~8,000 stations, a full vectorised haversine sweep takes ~1ms,
+    which is faster than KDTree overhead for datasets of this size.
     """
     _instance = None
 
     def __init__(self):
-        self.kdtree = None
         self.stations_data = []
         self.stations_by_id = {}
+        self._lats = None   # numpy array of all latitudes
+        self._lons = None   # numpy array of all longitudes
         self._load_data()
 
     @classmethod
@@ -47,42 +45,35 @@ class SpatialIndex:
         with open(DATA_FILE, 'r') as f:
             raw = json.load(f)
 
-        coords = []
-        self.stations_data = []
-        self.stations_by_id = {}
+        self.stations_data = raw
+        self.stations_by_id = {s['id']: s for s in raw}
+        self._lats = np.array([s['lat'] for s in raw], dtype=np.float64)
+        self._lons = np.array([s['lon'] for s in raw], dtype=np.float64)
 
-        for record in raw:
-            coords.append([record['lat'], record['lon']])
-            self.stations_data.append(record)
-            self.stations_by_id[record['id']] = record
+        logger.info(f"Loaded {len(raw)} stations into numpy spatial index.")
 
-        if coords:
-            self.kdtree = KDTree(np.array(coords))
-            logger.info(f"Loaded {len(coords)} stations into KDTree from JSON file.")
-        else:
-            logger.warning("No station data found in JSON file.")
-            self.kdtree = None
+    @staticmethod
+    def _haversine_miles_vectorised(lat, lon, lats, lons):
+        """
+        Compute distance in miles from point (lat, lon) to all points in
+        arrays (lats, lons) using vectorised numpy haversine.
+        """
+        R = 3958.8
+        phi1 = np.radians(lat)
+        phi2 = np.radians(lats)
+        dphi = phi2 - phi1
+        dlambda = np.radians(lons - lon)
+        a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+        return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
     def query_radius(self, lat, lon, radius_miles):
         """
         Return all stations within radius_miles of (lat, lon).
-        Uses cosine-corrected longitude approximation for accuracy across US latitudes.
+        Pure numpy — no scipy dependency.
         """
-        if not self.kdtree:
+        if self._lats is None or len(self._lats) == 0:
             return []
 
-        lat_radius = radius_miles / 69.0
-        lon_radius = radius_miles / (69.0 * max(np.cos(np.radians(lat)), 0.01))
-        search_radius = max(lat_radius, lon_radius)
-
-        indices = self.kdtree.query_ball_point([lat, lon], r=search_radius)
-
-        results = []
-        for i in indices:
-            s = self.stations_data[i]
-            dlat = abs(s['lat'] - lat) * 69.0
-            dlon = abs(s['lon'] - lon) * 69.0 * np.cos(np.radians(lat))
-            if np.sqrt(dlat**2 + dlon**2) <= radius_miles:
-                results.append(s)
-
-        return results
+        distances = self._haversine_miles_vectorised(lat, lon, self._lats, self._lons)
+        indices = np.where(distances <= radius_miles)[0]
+        return [self.stations_data[i] for i in indices]
