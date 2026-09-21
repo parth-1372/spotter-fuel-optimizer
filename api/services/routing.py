@@ -26,19 +26,63 @@ def _get_ors_client():
     return _ors_client
 
 
+# Approximate bounding boxes for USA (continental + Alaska + Hawaii)
+_USA_BOUNDS = [
+    (24.0, 50.0, -125.0, -66.0),   # Continental US
+    (51.0, 72.0, -170.0, -129.0),  # Alaska
+    (18.0, 23.0, -161.0, -154.0),  # Hawaii
+]
+
+def _is_within_usa(lat, lon):
+    """Return True if (lat, lon) falls within any USA bounding box."""
+    return any(
+        min_lat <= lat <= max_lat and min_lon <= lon <= max_lon
+        for min_lat, max_lat, min_lon, max_lon in _USA_BOUNDS
+    )
+
+
 def get_coordinates(location_name: str):
     """
     Geocode a US city/address string to (lat, lon).
-    Returns None if the location cannot be resolved.
+    Returns None if:
+    - Location cannot be resolved
+    - Result falls outside USA bounding boxes
+    - Result has low Nominatim importance score (< 0.4) — catches gibberish/partial matches
     """
     try:
-        location = _geolocator.geocode(f"{location_name}, USA", timeout=8)
-        if location:
-            logger.debug(f"Geocoded '{location_name}' -> ({location.latitude}, {location.longitude})")
-            return (location.latitude, location.longitude)
+        results = _geolocator.geocode(
+            f"{location_name}, USA",
+            timeout=8,
+            country_codes='us',
+            exactly_one=True,
+        )
+        if not results:
+            return None
+
+        lat, lon = results.latitude, results.longitude
+
+        # Reject if outside USA territory
+        if not _is_within_usa(lat, lon):
+            logger.warning(f"'{location_name}' geocoded outside USA — rejecting.")
+            return None
+
+        # Nominatim's importance score: real cities score ~0.5–1.0
+        # Street/partial/fuzzy matches score < 0.4 — reject them
+        importance = results.raw.get('importance', 0)
+        if importance < 0.4:
+            logger.warning(
+                f"'{location_name}' resolved with low importance ({importance:.3f}) "
+                f"— likely a fuzzy match, rejecting."
+            )
+            return None
+
+        logger.debug(f"Geocoded '{location_name}' -> ({lat}, {lon}) importance={importance:.3f}")
+        return (lat, lon)
+
     except Exception as e:
         logger.error(f"Geocoding failed for '{location_name}': {e}")
     return None
+
 
 
 def fetch_route(start_coords: tuple, end_coords: tuple):
