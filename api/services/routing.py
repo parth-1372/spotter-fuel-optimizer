@@ -43,40 +43,37 @@ def _is_within_usa(lat, lon):
 
 def get_coordinates(location_name: str):
     """
-    Geocode a US city/address string to (lat, lon).
+    Geocode a US city/address string to (lat, lon) using OpenRouteService.
+    Using ORS avoids the strict IP bans of public Nominatim (which blocks Render).
+    
     Returns None if:
     - Location cannot be resolved
     - Result falls outside USA bounding boxes
-    - Result has low Nominatim importance score (< 0.4) — catches gibberish/partial matches
     """
     try:
-        results = _geolocator.geocode(
-            f"{location_name}, USA",
-            timeout=8,
-            country_codes='us',
-            exactly_one=True,
+        # Restrict layers to actual administrative areas/cities to naturally filter out
+        # gibberish queries that happen to partially match random venues or streets.
+        client = _get_ors_client()
+        results = client.pelias_search(
+            text=f"{location_name}, USA",
+            country='US',
+            layers=['locality', 'region', 'county', 'macroregion', 'borough', 'localadmin']
         )
-        if not results:
+        
+        if not results or not results.get('features'):
+            logger.warning(f"'{location_name}' could not be resolved to a known US city/region.")
             return None
 
-        lat, lon = results.latitude, results.longitude
+        top_feature = results['features'][0]
+        # ORS returns coordinates as [lon, lat]
+        lon, lat = top_feature['geometry']['coordinates']
 
         # Reject if outside USA territory
         if not _is_within_usa(lat, lon):
             logger.warning(f"'{location_name}' geocoded outside USA — rejecting.")
             return None
 
-        # Nominatim's importance score: real cities score ~0.5–1.0
-        # Street/partial/fuzzy matches score < 0.4 — reject them
-        importance = results.raw.get('importance', 0)
-        if importance < 0.4:
-            logger.warning(
-                f"'{location_name}' resolved with low importance ({importance:.3f}) "
-                f"— likely a fuzzy match, rejecting."
-            )
-            return None
-
-        logger.debug(f"Geocoded '{location_name}' -> ({lat}, {lon}) importance={importance:.3f}")
+        logger.debug(f"Geocoded '{location_name}' -> ({lat}, {lon}) via ORS")
         return (lat, lon)
 
     except Exception as e:
